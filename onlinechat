@@ -9,13 +9,31 @@ import urllib3
 # 禁用安全警告（针对阿里内网环境常见证书问题）
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+def get_desktop_path():
+    """获取当前用户的桌面路径，优先检测 OneDrive 桌面"""
+    user_home = os.path.expanduser("~")
+    # 候选路径：OneDrive中文、OneDrive英文、普通桌面
+    candidates = [
+        os.path.join(user_home, "OneDrive", "桌面"),
+        os.path.join(user_home, "OneDrive", "Desktop"),
+        os.path.join(user_home, "Desktop"),
+        os.path.join(user_home, "桌面")
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return os.path.join(user_home, "Desktop") # 默认兜底
+
+# 获取动态桌面路径
+DESKTOP_PATH = get_desktop_path()
+
 
 # ==========================================
 # 任务一：AE 报销邮件同步 (LAX-AE, ORD-AE, MIA-AE)
 # ==========================================
 def run_email_sync_task():
     # --- 1. 路径与配置 ---
-    save_dir = r"C:\Users\larry\Desktop\测试文件夹"
+    save_dir = os.path.join(DESKTOP_PATH, "测试文件夹") # 使用检测到的桌面路径
     if not os.path.exists(save_dir):
         os.makedirs(save_dir, exist_ok=True)
 
@@ -188,7 +206,7 @@ def run_email_sync_task():
 # 任务二：4PX 邮件同步 (LAX-4PX, ORD-4PX, MIA-4PX)
 # ==========================================
 def run_4px_sync_task():
-    save_dir = r"C:\Users\larry\Desktop\测试文件夹"
+    save_dir = os.path.join(DESKTOP_PATH, "测试文件夹")
     if not os.path.exists(save_dir): os.makedirs(save_dir, exist_ok=True)
 
     TASKS = {"104": "LAX-4PX.xlsx", "108": "ORD-4PX.xlsx", "107": "MIA-4PX.xlsx"}
