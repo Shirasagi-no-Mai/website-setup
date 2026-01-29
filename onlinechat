@@ -1,0 +1,323 @@
+import os
+import json
+import re
+import requests
+import pandas as pd
+from bs4 import BeautifulSoup
+import urllib3
+
+# 禁用安全警告（针对阿里内网环境常见证书问题）
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+# ==========================================
+# 任务一：AE 报销邮件同步 (LAX-AE, ORD-AE, MIA-AE)
+# ==========================================
+def run_email_sync_task():
+    # --- 1. 路径与配置 ---
+    save_dir = r"C:\Users\larry\Desktop\测试文件夹"
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir, exist_ok=True)
+
+    TASKS = {
+        "101": "LAX-AE.xlsx",
+        "102": "ORD-AE.xlsx",
+        "106": "MIA-AE.xlsx"
+    }
+
+    DIST_MAP = {
+        "MAERSK-末端配送": "Maersk",
+        "美国统包标准配送资源": "COE",
+        "美国USPS直连末端配送": "USPS",
+        "SpeedX配送": "Speedx",
+        "UNIUNI末端配送": "UNIUNI"
+    }
+
+    # --- 2. 获取 Token 信息 ---
+    def get_auth():
+        user_home = os.path.expanduser("~")
+        possible_paths = [
+            os.path.join(user_home, "Desktop", "emailtoken.txt"),
+            os.path.join(user_home, "OneDrive", "桌面", "emailtoken.txt")
+        ]
+        token_path = next((p for p in possible_paths if os.path.exists(p)), None)
+        if not token_path: return None, None
+        try:
+            with open(token_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get("cookies", {}), data.get("xsrf_token", None)
+        except Exception as e:
+            print(f"❌ 无法读取 Token 文件: {e}")
+            return None, None
+
+    cookies, xsrf_token = get_auth()
+    if not xsrf_token:
+        print("❌ AE任务：未找到有效的 emailtoken.txt")
+        return
+
+    session = requests.Session()
+    session.cookies.update(cookies)
+    headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/x-www-form-urlencoded"}
+
+    # --- 3. 核心解析逻辑 ---
+    def parse_mail_body(html_body):
+        soup = BeautifulSoup(html_body, "html.parser")
+        num_re = re.compile(r'[\d,]+\.?\d*')
+        eta_re = re.compile(r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})')
+
+        res = {
+            "MAWB": "-", "FLT": "-", "ETA": "-", "T_CTN": 0, "T_PAR": 0, "T_WGT": "-",
+            "COE_PAR": "-",  # 新增：COE包裹数存储
+            "W": {k: "-" for k in DIST_MAP.values()},
+            "Q": {k: "-" for k in DIST_MAP.values()}
+        }
+
+        tables = soup.find_all("table", align="center")
+        if not tables: return res
+
+        # 主表数据提取
+        for row in tables[0].find_all("tr"):
+            tds = row.find_all("td")
+            if len(tds) < 2: continue
+            k, v = tds[0].get_text(strip=True), tds[1].get_text(strip=True)
+            if "MAWB No." in k:
+                res["MAWB"] = v
+            elif "Flight Number" in k:
+                res["FLT"] = v
+            elif "ETA" in k:
+                m = eta_re.search(v)
+                res["ETA"] = m.group(1) if m else v
+            elif "Gross Weight" in k:
+                m = num_re.search(v.replace(',', ''))
+                res["T_WGT"] = m.group(0) if m else v
+
+        # 分销商明细提取
+        for table in tables:
+            h = table.find("td", class_="distributorName")
+            if h:
+                dist_name = h.get_text(strip=True)  # 修正：获取分销商名称用于判断
+                if dist_name in DIST_MAP:
+                    col = DIST_MAP[dist_name]
+                    for row in table.find_all("tr"):
+                        tds = row.find_all("td")
+                        if len(tds) < 2: continue
+                        label = tds[0].get_text(strip=True)
+                        val_raw = tds[1].get_text(strip=True).replace(',', '')
+                        m = num_re.search(val_raw)
+                        val = float(m.group(0)) if m else 0
+
+                        # 特殊提取逻辑：如果分销商是COE，提取其包裹数
+                        if "美国统包标准配送资源" in dist_name and "Quantity of parcels" in label:
+                            res["COE_PAR"] = int(val) if val > 0 else "-"
+
+                        if "Gross Weight" in label:
+                            res["W"][col] = val if val > 0 else "-"
+                        elif "Number of CTN" in label:
+                            res["Q"][col] = int(val) if val > 0 else "-"
+                            res["T_CTN"] += val
+                        elif "Quantity of parcels" in label:
+                            res["T_PAR"] += val
+        return res
+
+    # --- 4. 任务执行 ---
+    for fid, fname in TASKS.items():
+        print(f"\n🚀 开始处理 AE 目录 {fid} -> {fname}")
+        list_url = "https://mail.alibaba-inc.com/alimail/ajax/mail/queryMailList.txt"
+        payload = {"query": f'{{"folderIds":["{fid}"]}}', "showFrom": "1", "offset": "0", "length": "20",
+                   "_tpl_": "v5ForWebDing", "_csrf_token_": xsrf_token}
+
+        try:
+            r = session.post(list_url, data=payload, headers=headers, verify=False)
+            text = r.text
+            if text.startswith("/**/"): text = re.search(r'\((.*)\)', text, re.DOTALL).group(1)
+            mails = json.loads(text).get("dataList", [])[:20]
+        except:
+            print(f"  ❌ 无法获取文件夹 {fid} 的邮件列表")
+            continue
+
+        results = []
+        for m in mails:
+            mid = m.get("mailId")
+            load_url = "https://mail.alibaba-inc.com/alimail/ajax/mail/loadMail.txt"
+            try:
+                res_json = session.post(load_url, data={"mailId": mid, "full": "1", "_tpl_": "v5ForWebDing",
+                                                        "_csrf_token_": xsrf_token}, headers=headers,
+                                        verify=False).json()
+                if res_json.get("status") in [0, 6]:
+                    info = parse_mail_body(res_json["data"]["body"])
+                    results.append({
+                        "主单": info["MAWB"], "航班号": info["FLT"], "ETA": info["ETA"],
+                        "总箱数": int(info["T_CTN"]), "总包裹数": int(info["T_PAR"]), "总重量": info["T_WGT"],
+                        "Maersk 重量": info["W"]["Maersk"], "COE 重量": info["W"]["COE"],
+                        "USPS 重量": info["W"]["USPS"],
+                        "Speedx重量": info["W"]["Speedx"], "UNIUNI 重量": info["W"]["UNIUNI"],
+                        "Maersk 大箱数": info["Q"]["Maersk"], "COE 大箱数": info["Q"]["COE"],
+                        "USPS 大箱数": info["Q"]["USPS"],
+                        "Speedx大箱数": info["Q"]["Speedx"], "UNIUNI 大箱数": info["Q"]["UNIUNI"],
+                        "COE包裹数": info["COE_PAR"]  # 添加到结果列表
+                    })
+            except:
+                pass
+
+        if results:
+            new_df = pd.DataFrame(results)
+            # 强制列序，确保 COE包裹数 在最后
+            cols = ["主单", "航班号", "ETA", "总箱数", "总包裹数", "总重量",
+                    "Maersk 重量", "COE 重量", "USPS 重量", "Speedx重量", "UNIUNI 重量",
+                    "Maersk 大箱数", "COE 大箱数", "USPS 大箱数", "Speedx大箱数", "UNIUNI 大箱数", "COE包裹数"]
+            new_df = new_df.reindex(columns=cols)
+
+            file_path = os.path.join(save_dir, fname)
+            if os.path.exists(file_path):
+                old_df = pd.read_excel(file_path)
+                combined_df = pd.concat([old_df, new_df], ignore_index=True)
+            else:
+                combined_df = new_df
+
+            # 去重：保留非空信息最全的行
+            combined_df.replace("-", pd.NA, inplace=True)
+            target_cols = cols[6:]  # 从分销商数据开始算分
+            combined_df['score'] = combined_df[target_cols].notna().sum(axis=1)
+            final_df = combined_df.sort_values(by=["主单", "score"], ascending=[True, False]).drop_duplicates(
+                subset=["主单"], keep="first")
+            final_df.drop(columns=['score']).fillna("-").to_excel(file_path, index=False)
+            print(f"  ✅ 已更新并去重保存: {fname}")
+
+
+# ==========================================
+# 任务二：4PX 邮件同步 (LAX-4PX, ORD-4PX, MIA-4PX)
+# ==========================================
+def run_4px_sync_task():
+    save_dir = r"C:\Users\larry\Desktop\测试文件夹"
+    if not os.path.exists(save_dir): os.makedirs(save_dir, exist_ok=True)
+
+    TASKS = {"104": "LAX-4PX.xlsx", "108": "ORD-4PX.xlsx", "107": "MIA-4PX.xlsx"}
+    CHANNEL_ORDER = [
+        "COE/UP", "GOFO", "SPX", "TOO", "USPS", "YW EXP", "DHL", "ACI", "FEDEX", "IB", "UNIUNI", "OC UNIUNI",
+        "ATL-GOFO", "ATL-USPS", "ATL-ACI", "ATL-DHL"  # <--- 必须把这些补在这里！
+    ]
+    EXACT_MATCH_TO_STD = {"GOFO": "GOFO", "TOOEXPRESS": "TOO", "TOOEXPRESS-DF": "TOO", "UNIUNI": "UNIUNI",
+                          "OC-UNI": "OC UNIUNI", "DHL": "DHL", "IB": "IB", "SPX": "SPX", "ACI": "ACI",
+                          "FEDEX GROUND": "FEDEX", "USPS-GA": "USPS", "COE": "COE/UP", "YW EXPRESS": "YW EXP",
+                          "YW EXP": "YW EXP","ATL-GOFO": "ATL-GOFO", "ATL-USPS": "ATL-USPS", "ATL-ACI": "ATL-ACI","ATL-DHL": "ATL-DHL"}
+
+    def get_auth():
+        user_home = os.path.expanduser("~")
+        possible_paths = [os.path.join(user_home, "Desktop", "emailtoken.txt"),
+                          os.path.join(user_home, "OneDrive", "桌面", "emailtoken.txt")]
+        token_path = next((p for p in possible_paths if os.path.exists(p)), None)
+        if not token_path: return None, None
+        try:
+            with open(token_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get("cookies", {}), data.get("xsrf_token", None)
+        except:
+            return None, None
+
+    cookies, xsrf_token = get_auth()
+    if not xsrf_token: return
+
+    session = requests.Session()
+    session.cookies.update(cookies)
+    headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/x-www-form-urlencoded"}
+
+    def parse_mail_body(html_body):
+        soup = BeautifulSoup(html_body, "html.parser")
+        num_re = re.compile(r'[\d,]+\.?\d*')
+        eta_re = re.compile(r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})')
+        res = {"MAWB": "-", "FLT": "-", "ETA": "-", "T_WGT": "-", "T_PAR": "-", "T_CTN": "-",
+               "W": {k: "-" for k in CHANNEL_ORDER}, "Q": {k: "-" for k in CHANNEL_ORDER}}
+
+        tables = soup.find_all("table", align="center")
+        if tables:
+            for row in tables[0].find_all("tr"):
+                tds = row.find_all("td")
+                if len(tds) < 2: continue
+                k, v = tds[0].get_text(strip=True), tds[1].get_text(strip=True)
+                if "MAWB No." in k:
+                    res["MAWB"] = v
+                elif "Flight Number" in k:
+                    res["FLT"] = v
+                elif "ETA" in k:
+                    m = eta_re.search(v);
+                    res["ETA"] = m.group(1) if m else v
+                elif "Gross Weight" in k:
+                    m = num_re.search(v.replace(',', ''));
+                    res["T_WGT"] = m.group(0) if m else v
+                elif "Quantity of parcels" in k:
+                    m = num_re.search(v.replace(',', ''));
+                    res["T_PAR"] = m.group(0) if m else v
+                elif "Number of CTN" in k:
+                    m = num_re.search(v.replace(',', ''));
+                    res["T_CTN"] = m.group(0) if m else v
+
+        all_tables = soup.find_all("table")
+        for table in all_tables:
+            for row in table.find_all("tr"):
+                tds = row.find_all("td")
+                if len(tds) < 4: continue
+                channel_raw = tds[0].get_text(strip=True)
+                if channel_raw in EXACT_MATCH_TO_STD:
+                    std_name = EXACT_MATCH_TO_STD[channel_raw]
+                    try:
+                        ctn_val = num_re.search(tds[1].get_text(strip=True).replace(',', '')).group(0)
+                        wgt_val = num_re.search(tds[3].get_text(strip=True).replace(',', '')).group(0)
+                        res["Q"][std_name] = ctn_val;
+                        res["W"][std_name] = wgt_val
+                    except:
+                        pass
+        return res
+
+    for fid, fname in TASKS.items():
+        print(f"🚀 处理 4PX 目录 {fid} -> {fname}")
+        list_url = "https://mail.alibaba-inc.com/alimail/ajax/mail/queryMailList.txt"
+        payload = {"query": f'{{"folderIds":["{fid}"]}}', "showFrom": "1", "offset": "0", "length": "20",
+                   "_tpl_": "v5ForWebDing", "_csrf_token_": xsrf_token}
+        try:
+            r = session.post(list_url, data=payload, headers=headers, verify=False)
+            text = r.text
+            if text.startswith("/**/"): text = re.search(r'\((.*)\)', text, re.DOTALL).group(1)
+            mails = json.loads(text).get("dataList", [])
+        except:
+            continue
+
+        new_results = []
+        for m in mails:
+            mid = m.get("mailId")
+            load_url = "https://mail.alibaba-inc.com/alimail/ajax/mail/loadMail.txt"
+            try:
+                mail_json = session.post(load_url, data={"mailId": mid, "full": "1", "_tpl_": "v5ForWebDing",
+                                                         "_csrf_token_": xsrf_token}, headers=headers,
+                                         verify=False).json()
+                if mail_json.get("status") in [0, 6]:
+                    info = parse_mail_body(mail_json["data"]["body"])
+                    row_data = {"MAWB": info["MAWB"], "Flight Number": info["FLT"], "ETA": info["ETA"],
+                                "Weight": info["T_WGT"], "Total Parcels": info["T_PAR"], "Total CTN": info["T_CTN"]}
+                    for ch in CHANNEL_ORDER: row_data[f"{ch} Weight"] = info["W"][ch]
+                    for ch in CHANNEL_ORDER: row_data[f"{ch} CTN"] = info["Q"][ch]
+                    new_results.append(row_data)
+            except:
+                continue
+
+        if new_results:
+            new_df = pd.DataFrame(new_results)
+            file_path = os.path.join(save_dir, fname)
+            if os.path.exists(file_path):
+                old_df = pd.read_excel(file_path)
+                combined_df = pd.concat([old_df, new_df], ignore_index=True)
+            else:
+                combined_df = new_df
+            combined_df.replace("-", pd.NA, inplace=True)
+            check_cols = [c for c in combined_df.columns if "Weight" in c or "CTN" in c]
+            combined_df['score'] = combined_df[check_cols].notna().sum(axis=1)
+            final_df = combined_df.sort_values("score", ascending=False).drop_duplicates("MAWB", keep="first")
+            final_df.drop(columns=['score']).fillna("-").sort_values("MAWB").to_excel(file_path, index=False)
+            print(f"  ✅ {fname} 已更新。")
+
+
+# --- 主程序入口 ---
+if __name__ == "__main__":
+    print("=== 开始邮件同步程序 ===")
+    run_4px_sync_task()
+    run_email_sync_task()
+    print("=== 全部同步完成 ===")
