@@ -196,8 +196,10 @@ def run_email_sync_task():
             combined_df.replace("-", pd.NA, inplace=True)
             target_cols = cols[6:]  # 从分销商数据开始算分
             combined_df['score'] = combined_df[target_cols].notna().sum(axis=1)
-            final_df = combined_df.sort_values(by=["主单", "score"], ascending=[True, False]).drop_duplicates(
+            final_df = combined_df.sort_values(by="score", ascending=False).drop_duplicates(
                 subset=["主单"], keep="first")
+
+            # 保存时直接导出，保持“旧的在上，新的在下”的自然顺序
             final_df.drop(columns=['score']).fillna("-").to_excel(file_path, index=False)
             print(f"  ✅ 已更新并去重保存: {fname}")
 
@@ -329,7 +331,8 @@ def run_4px_sync_task():
             check_cols = [c for c in combined_df.columns if "Weight" in c or "CTN" in c]
             combined_df['score'] = combined_df[check_cols].notna().sum(axis=1)
             final_df = combined_df.sort_values("score", ascending=False).drop_duplicates("MAWB", keep="first")
-            final_df.drop(columns=['score']).fillna("-").sort_values("MAWB").to_excel(file_path, index=False)
+            # 删掉 .sort_values("MAWB")，新邮件就会乖乖待在 Excel 的最末尾
+            final_df.drop(columns=['score']).fillna("-").to_excel(file_path, index=False
             print(f"  ✅ {fname} 已更新。")
 
 
