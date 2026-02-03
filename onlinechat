@@ -332,6 +332,7 @@ def run_4px_sync_task():
             combined_df['score'] = combined_df[check_cols].notna().sum(axis=1)
             final_df = combined_df.sort_values("score", ascending=False).drop_duplicates("MAWB", keep="first")
             # 删掉 .sort_values("MAWB")，新邮件就会乖乖待在 Excel 的最末尾
+
             final_df.drop(columns=['score']).fillna("-").to_excel(file_path, index=False)
             print(f"  ✅ {fname} 已更新。")
 
