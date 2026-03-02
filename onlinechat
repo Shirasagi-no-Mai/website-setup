@@ -141,14 +141,14 @@ def run_email_sync_task():
     for fid, fname in TASKS.items():
         print(f"\n🚀 开始处理 AE 目录 {fid} -> {fname}")
         list_url = "https://mail.alibaba-inc.com/alimail/ajax/mail/queryMailList.txt"
-        payload = {"query": f'{{"folderIds":["{fid}"]}}', "showFrom": "1", "offset": "0", "length": "100",
+        payload = {"query": f'{{"folderIds":["{fid}"]}}', "showFrom": "1", "offset": "0", "length": "20",
                    "_tpl_": "v5ForWebDing", "_csrf_token_": xsrf_token}
 
         try:
             r = session.post(list_url, data=payload, headers=headers, verify=False)
             text = r.text
             if text.startswith("/**/"): text = re.search(r'\((.*)\)', text, re.DOTALL).group(1)
-            mails = json.loads(text).get("dataList", [])[:100]
+            mails = json.loads(text).get("dataList", [])[:20]
         except:
             print(f"  ❌ 无法获取文件夹 {fid} 的邮件列表")
             continue
@@ -291,7 +291,7 @@ def run_4px_sync_task():
     for fid, fname in TASKS.items():
         print(f"🚀 处理 4PX 目录 {fid} -> {fname}")
         list_url = "https://mail.alibaba-inc.com/alimail/ajax/mail/queryMailList.txt"
-        payload = {"query": f'{{"folderIds":["{fid}"]}}', "showFrom": "1", "offset": "0", "length": "100",
+        payload = {"query": f'{{"folderIds":["{fid}"]}}', "showFrom": "1", "offset": "0", "length": "20",
                    "_tpl_": "v5ForWebDing", "_csrf_token_": xsrf_token}
         try:
             r = session.post(list_url, data=payload, headers=headers, verify=False)
