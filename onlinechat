@@ -12,7 +12,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 def get_desktop_path():
     """获取当前用户的桌面路径，优先检测 OneDrive 桌面"""
     user_home = os.path.expanduser("~")
-    # 候选路径：OneDrive中文、OneDrive英文、普通桌面
     candidates = [
         os.path.join(user_home, "OneDrive", "桌面"),
         os.path.join(user_home, "OneDrive", "Desktop"),
@@ -22,18 +21,15 @@ def get_desktop_path():
     for path in candidates:
         if os.path.exists(path):
             return path
-    return os.path.join(user_home, "Desktop") # 默认兜底
+    return os.path.join(user_home, "Desktop")
 
-# 获取动态桌面路径
 DESKTOP_PATH = get_desktop_path()
 
-
 # ==========================================
-# 任务一：AE 报销邮件同步 (LAX-AE, ORD-AE, MIA-AE)
+# 任务一：AE 报销邮件同步
 # ==========================================
 def run_email_sync_task():
-    # --- 1. 路径与配置 ---
-    save_dir = os.path.join(DESKTOP_PATH, "测试文件夹") # 使用检测到的桌面路径
+    save_dir = os.path.join(DESKTOP_PATH, "测试文件夹")
     if not os.path.exists(save_dir):
         os.makedirs(save_dir, exist_ok=True)
 
@@ -51,7 +47,6 @@ def run_email_sync_task():
         "UNIUNI末端配送": "UNIUNI"
     }
 
-    # --- 2. 获取 Token 信息 ---
     def get_auth():
         user_home = os.path.expanduser("~")
         possible_paths = [
@@ -77,15 +72,14 @@ def run_email_sync_task():
     session.cookies.update(cookies)
     headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/x-www-form-urlencoded"}
 
-    # --- 3. 核心解析逻辑 ---
     def parse_mail_body(html_body):
         soup = BeautifulSoup(html_body, "html.parser")
         num_re = re.compile(r'[\d,]+\.?\d*')
-        eta_re = re.compile(r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})')
+        eta_re = re.compile(r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?)')
 
         res = {
             "MAWB": "-", "FLT": "-", "ETA": "-", "T_CTN": 0, "T_PAR": 0, "T_WGT": "-",
-            "COE_PAR": "-",  # 新增：COE包裹数存储
+            "COE_PAR": "-",
             "W": {k: "-" for k in DIST_MAP.values()},
             "Q": {k: "-" for k in DIST_MAP.values()}
         }
@@ -93,7 +87,6 @@ def run_email_sync_task():
         tables = soup.find_all("table", align="center")
         if not tables: return res
 
-        # 主表数据提取
         for row in tables[0].find_all("tr"):
             tds = row.find_all("td")
             if len(tds) < 2: continue
@@ -109,11 +102,10 @@ def run_email_sync_task():
                 m = num_re.search(v.replace(',', ''))
                 res["T_WGT"] = m.group(0) if m else v
 
-        # 分销商明细提取
         for table in tables:
             h = table.find("td", class_="distributorName")
             if h:
-                dist_name = h.get_text(strip=True)  # 修正：获取分销商名称用于判断
+                dist_name = h.get_text(strip=True)
                 if dist_name in DIST_MAP:
                     col = DIST_MAP[dist_name]
                     for row in table.find_all("tr"):
@@ -124,7 +116,6 @@ def run_email_sync_task():
                         m = num_re.search(val_raw)
                         val = float(m.group(0)) if m else 0
 
-                        # 特殊提取逻辑：如果分销商是COE，提取其包裹数
                         if "美国统包标准配送资源" in dist_name and "Quantity of parcels" in label:
                             res["COE_PAR"] = int(val) if val > 0 else "-"
 
@@ -137,7 +128,6 @@ def run_email_sync_task():
                             res["T_PAR"] += val
         return res
 
-    # --- 4. 任务执行 ---
     for fid, fname in TASKS.items():
         print(f"\n🚀 开始处理 AE 目录 {fid} -> {fname}")
         list_url = "https://mail.alibaba-inc.com/alimail/ajax/mail/queryMailList.txt"
@@ -172,14 +162,13 @@ def run_email_sync_task():
                         "Maersk 大箱数": info["Q"]["Maersk"], "COE 大箱数": info["Q"]["COE"],
                         "USPS 大箱数": info["Q"]["USPS"],
                         "Speedx大箱数": info["Q"]["Speedx"], "UNIUNI 大箱数": info["Q"]["UNIUNI"],
-                        "COE包裹数": info["COE_PAR"]  # 添加到结果列表
+                        "COE包裹数": info["COE_PAR"]
                     })
             except:
                 pass
 
         if results:
             new_df = pd.DataFrame(results)
-            # 强制列序，确保 COE包裹数 在最后
             cols = ["主单", "航班号", "ETA", "总箱数", "总包裹数", "总重量",
                     "Maersk 重量", "COE 重量", "USPS 重量", "Speedx重量", "UNIUNI 重量",
                     "Maersk 大箱数", "COE 大箱数", "USPS 大箱数", "Speedx大箱数", "UNIUNI 大箱数", "COE包裹数"]
@@ -192,20 +181,26 @@ def run_email_sync_task():
             else:
                 combined_df = new_df
 
-            # 去重：保留非空信息最全的行
             combined_df.replace("-", pd.NA, inplace=True)
-            target_cols = cols[6:]  # 从分销商数据开始算分
+            target_cols = cols[6:]
             combined_df['score'] = combined_df[target_cols].notna().sum(axis=1)
+            
+            # --- 排序与去重逻辑 ---
+            # 1. 先按完整度排序，确保去重时保留信息最全的行
             final_df = combined_df.sort_values(by="score", ascending=False).drop_duplicates(
                 subset=["主单"], keep="first")
+            
+            # 2. 统一转换为日期格式并按 ETA 升序排列
+            final_df['ETA_dt'] = pd.to_datetime(final_df['ETA'], errors='coerce')
+            final_df = final_df.sort_values(by='ETA_dt', ascending=True, na_position='last')
 
-            # 保存时直接导出，保持“旧的在上，新的在下”的自然顺序
-            final_df.drop(columns=['score']).fillna("-").to_excel(file_path, index=False)
-            print(f"  ✅ 已更新并去重保存: {fname}")
+            # 3. 清理辅助列并保存
+            final_df.drop(columns=['score', 'ETA_dt']).fillna("-").to_excel(file_path, index=False)
+            print(f"  ✅ 已排序并保存: {fname}")
 
 
 # ==========================================
-# 任务二：4PX 邮件同步 (LAX-4PX, ORD-4PX, MIA-4PX)
+# 任务二：4PX 邮件同步
 # ==========================================
 def run_4px_sync_task():
     save_dir = os.path.join(DESKTOP_PATH, "测试文件夹")
@@ -214,7 +209,7 @@ def run_4px_sync_task():
     TASKS = {"104": "LAX-4PX.xlsx", "108": "ORD-4PX.xlsx", "107": "MIA-4PX.xlsx"}
     CHANNEL_ORDER = [
         "COE/UP", "GOFO", "SPX", "TOO", "USPS", "YW EXP", "DHL", "ACI", "FEDEX", "IB", "UNIUNI", "OC UNIUNI",
-        "ATL-GOFO", "ATL-USPS", "ATL-ACI", "ATL-DHL"  # <--- 必须把这些补在这里！
+        "ATL-GOFO", "ATL-USPS", "ATL-ACI", "ATL-DHL"
     ]
     EXACT_MATCH_TO_STD = {"GOFO": "GOFO", "TOOEXPRESS": "TOO", "TOOEXPRESS-DF": "TOO", "UNIUNI": "UNIUNI",
                           "OC-UNI": "OC UNIUNI", "DHL": "DHL", "IB": "IB", "SPX": "SPX", "ACI": "ACI",
@@ -244,7 +239,7 @@ def run_4px_sync_task():
     def parse_mail_body(html_body):
         soup = BeautifulSoup(html_body, "html.parser")
         num_re = re.compile(r'[\d,]+\.?\d*')
-        eta_re = re.compile(r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})')
+        eta_re = re.compile(r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?)')
         res = {"MAWB": "-", "FLT": "-", "ETA": "-", "T_WGT": "-", "T_PAR": "-", "T_CTN": "-",
                "W": {k: "-" for k in CHANNEL_ORDER}, "Q": {k: "-" for k in CHANNEL_ORDER}}
 
@@ -259,16 +254,16 @@ def run_4px_sync_task():
                 elif "Flight Number" in k:
                     res["FLT"] = v
                 elif "ETA" in k:
-                    m = eta_re.search(v);
+                    m = eta_re.search(v)
                     res["ETA"] = m.group(1) if m else v
                 elif "Gross Weight" in k:
-                    m = num_re.search(v.replace(',', ''));
+                    m = num_re.search(v.replace(',', ''))
                     res["T_WGT"] = m.group(0) if m else v
                 elif "Quantity of parcels" in k:
-                    m = num_re.search(v.replace(',', ''));
+                    m = num_re.search(v.replace(',', ''))
                     res["T_PAR"] = m.group(0) if m else v
                 elif "Number of CTN" in k:
-                    m = num_re.search(v.replace(',', ''));
+                    m = num_re.search(v.replace(',', ''))
                     res["T_CTN"] = m.group(0) if m else v
 
         all_tables = soup.find_all("table")
@@ -327,17 +322,21 @@ def run_4px_sync_task():
                 combined_df = pd.concat([old_df, new_df], ignore_index=True)
             else:
                 combined_df = new_df
+
             combined_df.replace("-", pd.NA, inplace=True)
             check_cols = [c for c in combined_df.columns if "Weight" in c or "CTN" in c]
             combined_df['score'] = combined_df[check_cols].notna().sum(axis=1)
+            
+            # --- 排序与去重逻辑 ---
             final_df = combined_df.sort_values("score", ascending=False).drop_duplicates("MAWB", keep="first")
-            # 删掉 .sort_values("MAWB")，新邮件就会乖乖待在 Excel 的最末尾
+            
+            final_df['ETA_dt'] = pd.to_datetime(final_df['ETA'], errors='coerce')
+            final_df = final_df.sort_values(by='ETA_dt', ascending=True, na_position='last')
 
-            final_df.drop(columns=['score']).fillna("-").to_excel(file_path, index=False)
-            print(f"  ✅ {fname} 已更新。")
+            final_df.drop(columns=['score', 'ETA_dt']).fillna("-").to_excel(file_path, index=False)
+            print(f"  ✅ {fname} 已排序并保存。")
 
 
-# --- 主程序入口 ---
 if __name__ == "__main__":
     print("=== 开始邮件同步程序 ===")
     run_4px_sync_task()
