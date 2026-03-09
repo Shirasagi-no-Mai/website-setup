@@ -75,7 +75,6 @@ def run_email_sync_task():
     def parse_mail_body(html_body):
         soup = BeautifulSoup(html_body, "html.parser")
         num_re = re.compile(r'[\d,]+\.?\d*')
-        # 仅做简单匹配，不进行任何日期格式化
         eta_re = re.compile(r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?)')
 
         res = {
@@ -133,20 +132,19 @@ def run_email_sync_task():
         print(f"\n🚀 开始处理 AE 目录 {fid} -> {fname}")
         list_url = "https://mail.alibaba-inc.com/alimail/ajax/mail/queryMailList.txt"
         payload = {"query": f'{{"folderIds":["{fid}"]}}', "showFrom": "1", "offset": "0", "length": "20",
-                   "_tpl_": "v5ForWebDing", "_csrf_token_": xsrf_token}
+                    "_tpl_": "v5ForWebDing", "_csrf_token_": xsrf_token}
 
         try:
             r = session.post(list_url, data=payload, headers=headers, verify=False)
             text = r.text
             if text.startswith("/**/"): text = re.search(r'\((.*)\)', text, re.DOTALL).group(1)
             mails = json.loads(text).get("dataList", [])[:20]
-            # 反转邮件列表，让时间上较旧的在前，最新的在最后追加
             mails.reverse()
         except:
             print(f"  ❌ 无法获取文件夹 {fid} 的邮件列表")
             continue
 
-        new_results = []
+        results = [] # 修复点 1: 初始化 results 列表
         for m in mails:
             mid = m.get("mailId")
             load_url = "https://mail.alibaba-inc.com/alimail/ajax/mail/loadMail.txt"
@@ -156,9 +154,20 @@ def run_email_sync_task():
                                         verify=False).json()
                 if res_json.get("status") in [0, 6]:
                     info = parse_mail_body(res_json["data"]["body"])
+                    
+                    # 修复点 2: 安全转换数值，防止 int("-") 报错
+                    try:
+                        t_ctn = int(float(info["T_CTN"]))
+                    except:
+                        t_ctn = 0
+                    try:
+                        t_par = int(float(info["T_PAR"]))
+                    except:
+                        t_par = 0
+
                     results.append({
                         "主单": info["MAWB"], "航班号": info["FLT"], "ETA": info["ETA"],
-                        "总箱数": int(info["T_CTN"]), "总包裹数": int(info["T_PAR"]), "总重量": info["T_WGT"],
+                        "总箱数": t_ctn, "总包裹数": t_par, "总重量": info["T_WGT"],
                         "Maersk 重量": info["W"]["Maersk"], "COE 重量": info["W"]["COE"],
                         "USPS 重量": info["W"]["USPS"],
                         "Speedx重量": info["W"]["Speedx"], "UNIUNI 重量": info["W"]["UNIUNI"],
@@ -180,14 +189,11 @@ def run_email_sync_task():
             file_path = os.path.join(save_dir, fname)
             if os.path.exists(file_path):
                 old_df = pd.read_excel(file_path)
-                # 强制追加：旧的在上，提取到的 new_df 在下
                 combined_df = pd.concat([old_df, new_df], ignore_index=True)
             else:
                 combined_df = new_df
 
-            # 去重：如有重复单号，保留最后出现的（即最新提取的）记录，且不进行任何 sort_values 排序
             final_df = combined_df.drop_duplicates(subset=["主单"], keep="last")
-
             final_df.fillna("-").to_excel(file_path, index=False)
             print(f"  ✅ 已更新并保持提取顺序: {fname}")
 
@@ -268,7 +274,7 @@ def run_4px_sync_task():
                     try:
                         ctn_val = num_re.search(tds[1].get_text(strip=True).replace(',', '')).group(0)
                         wgt_val = num_re.search(tds[3].get_text(strip=True).replace(',', '')).group(0)
-                        res["Q"][std_name] = ctn_val;
+                        res["Q"][std_name] = ctn_val
                         res["W"][std_name] = wgt_val
                     except:
                         pass
@@ -284,7 +290,6 @@ def run_4px_sync_task():
             text = r.text
             if text.startswith("/**/"): text = re.search(r'\((.*)\)', text, re.DOTALL).group(1)
             mails = json.loads(text).get("dataList", [])
-            # 反转邮件，保证最新抓到的排在最后
             mails.reverse()
         except:
             continue
@@ -316,9 +321,7 @@ def run_4px_sync_task():
             else:
                 combined_df = new_df
 
-            # 去重逻辑：绝对保留最后提取的一行，不使用任何排序算法
             final_df = combined_df.drop_duplicates(subset=["MAWB"], keep="last")
-
             final_df.fillna("-").to_excel(file_path, index=False)
             print(f"  ✅ {fname} 已更新，提取顺序置底。")
 
