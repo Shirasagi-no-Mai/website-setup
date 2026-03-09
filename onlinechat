@@ -75,6 +75,7 @@ def run_email_sync_task():
     def parse_mail_body(html_body):
         soup = BeautifulSoup(html_body, "html.parser")
         num_re = re.compile(r'[\d,]+\.?\d*')
+        # 仅做简单匹配，不进行任何日期格式化
         eta_re = re.compile(r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?)')
 
         res = {
@@ -139,11 +140,13 @@ def run_email_sync_task():
             text = r.text
             if text.startswith("/**/"): text = re.search(r'\((.*)\)', text, re.DOTALL).group(1)
             mails = json.loads(text).get("dataList", [])[:20]
+            # 反转邮件列表，让时间上较旧的在前，最新的在最后追加
+            mails.reverse()
         except:
             print(f"  ❌ 无法获取文件夹 {fid} 的邮件列表")
             continue
 
-        results = []
+        new_results = []
         for m in mails:
             mid = m.get("mailId")
             load_url = "https://mail.alibaba-inc.com/alimail/ajax/mail/loadMail.txt"
@@ -177,27 +180,16 @@ def run_email_sync_task():
             file_path = os.path.join(save_dir, fname)
             if os.path.exists(file_path):
                 old_df = pd.read_excel(file_path)
+                # 强制追加：旧的在上，提取到的 new_df 在下
                 combined_df = pd.concat([old_df, new_df], ignore_index=True)
             else:
                 combined_df = new_df
 
-            combined_df.replace("-", pd.NA, inplace=True)
-            target_cols = cols[6:]
-            combined_df['score'] = combined_df[target_cols].notna().sum(axis=1)
-            
-            # --- 排序与去重逻辑 ---
-            # 1. 先按完整度排序，确保去重时保留信息最全的行
-            final_df['ETA'] = final_df['ETA'].astype(str).str.strip()
-            
-            # 2. 转换为时间对象（Pandas 会自动补齐秒数进行精确比较）
-            final_df['ETA_dt'] = pd.to_datetime(final_df['ETA'], errors='coerce')
-            
-            # 3. 核心修复：先按时间排，时间相同的按主单排，确保排序绝对稳定
-            # 如果你想让最新的在最下面，用 True；最新的在最上面，用 False
-            final_df = final_df.sort_values(by=['ETA_dt', '主单'], ascending=[True, True], na_position='last')
+            # 去重：如有重复单号，保留最后出现的（即最新提取的）记录，且不进行任何 sort_values 排序
+            final_df = combined_df.drop_duplicates(subset=["主单"], keep="last")
 
-            # 4. 删除辅助列并保存
-            final_df.drop(columns=['score', 'ETA_dt']).fillna("-").to_excel(file_path, index=False)
+            final_df.fillna("-").to_excel(file_path, index=False)
+            print(f"  ✅ 已更新并保持提取顺序: {fname}")
 
 
 # ==========================================
@@ -240,7 +232,6 @@ def run_4px_sync_task():
     def parse_mail_body(html_body):
         soup = BeautifulSoup(html_body, "html.parser")
         num_re = re.compile(r'[\d,]+\.?\d*')
-        eta_re = re.compile(r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?)')
         res = {"MAWB": "-", "FLT": "-", "ETA": "-", "T_WGT": "-", "T_PAR": "-", "T_CTN": "-",
                "W": {k: "-" for k in CHANNEL_ORDER}, "Q": {k: "-" for k in CHANNEL_ORDER}}
 
@@ -255,8 +246,7 @@ def run_4px_sync_task():
                 elif "Flight Number" in k:
                     res["FLT"] = v
                 elif "ETA" in k:
-                    m = eta_re.search(v)
-                    res["ETA"] = m.group(1) if m else v
+                    res["ETA"] = v
                 elif "Gross Weight" in k:
                     m = num_re.search(v.replace(',', ''))
                     res["T_WGT"] = m.group(0) if m else v
@@ -294,6 +284,8 @@ def run_4px_sync_task():
             text = r.text
             if text.startswith("/**/"): text = re.search(r'\((.*)\)', text, re.DOTALL).group(1)
             mails = json.loads(text).get("dataList", [])
+            # 反转邮件，保证最新抓到的排在最后
+            mails.reverse()
         except:
             continue
 
@@ -324,18 +316,11 @@ def run_4px_sync_task():
             else:
                 combined_df = new_df
 
-            combined_df.replace("-", pd.NA, inplace=True)
-            check_cols = [c for c in combined_df.columns if "Weight" in c or "CTN" in c]
-            combined_df['score'] = combined_df[check_cols].notna().sum(axis=1)
-            
-            # --- 排序与去重逻辑 ---
-            final_df = combined_df.sort_values("score", ascending=False).drop_duplicates("MAWB", keep="first")
-            
-            final_df['ETA_dt'] = pd.to_datetime(final_df['ETA'], errors='coerce')
-            final_df = final_df.sort_values(by='ETA_dt', ascending=True, na_position='last')
+            # 去重逻辑：绝对保留最后提取的一行，不使用任何排序算法
+            final_df = combined_df.drop_duplicates(subset=["MAWB"], keep="last")
 
-            final_df.drop(columns=['score', 'ETA_dt']).fillna("-").to_excel(file_path, index=False)
-            print(f"  ✅ {fname} 已排序并保存。")
+            final_df.fillna("-").to_excel(file_path, index=False)
+            print(f"  ✅ {fname} 已更新，提取顺序置底。")
 
 
 if __name__ == "__main__":
