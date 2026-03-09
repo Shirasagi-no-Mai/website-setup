@@ -187,16 +187,17 @@ def run_email_sync_task():
             
             # --- 排序与去重逻辑 ---
             # 1. 先按完整度排序，确保去重时保留信息最全的行
-            final_df = combined_df.sort_values(by="score", ascending=False).drop_duplicates(
-                subset=["主单"], keep="first")
+            final_df['ETA'] = final_df['ETA'].astype(str).str.strip()
             
-            # 2. 统一转换为日期格式并按 ETA 升序排列
+            # 2. 转换为时间对象（Pandas 会自动补齐秒数进行精确比较）
             final_df['ETA_dt'] = pd.to_datetime(final_df['ETA'], errors='coerce')
-            final_df = final_df.sort_values(by='ETA_dt', ascending=True, na_position='last')
+            
+            # 3. 核心修复：先按时间排，时间相同的按主单排，确保排序绝对稳定
+            # 如果你想让最新的在最下面，用 True；最新的在最上面，用 False
+            final_df = final_df.sort_values(by=['ETA_dt', '主单'], ascending=[True, True], na_position='last')
 
-            # 3. 清理辅助列并保存
+            # 4. 删除辅助列并保存
             final_df.drop(columns=['score', 'ETA_dt']).fillna("-").to_excel(file_path, index=False)
-            print(f"  ✅ 已排序并保存: {fname}")
 
 
 # ==========================================
