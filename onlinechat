@@ -36,7 +36,7 @@ def run_email_sync_task():
     if not os.path.exists(save_dir):
         os.makedirs(save_dir, exist_ok=True)
 
-    FETCH_LIMIT = 1000  # <--- 在这里设置你想要的总数，比如 200
+    FETCH_LIMIT = 400  # <--- 在这里设置你想要的总数，比如 200
     PAGE_SIZE = 50    # 每页取多少，建议不要超过 100
     TASKS = {
         "101": "LAX-AE.xlsx",
