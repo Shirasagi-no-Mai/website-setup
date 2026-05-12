@@ -9,6 +9,7 @@ import urllib3
 # 禁用安全警告（针对阿里内网环境常见证书问题）
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+
 def get_desktop_path():
     """获取当前用户的桌面路径，优先检测 OneDrive 桌面"""
     user_home = os.path.expanduser("~")
@@ -23,7 +24,9 @@ def get_desktop_path():
             return path
     return os.path.join(user_home, "Desktop")
 
+
 DESKTOP_PATH = get_desktop_path()
+
 
 # ==========================================
 # 任务一：AE 报销邮件同步
@@ -33,6 +36,8 @@ def run_email_sync_task():
     if not os.path.exists(save_dir):
         os.makedirs(save_dir, exist_ok=True)
 
+    FETCH_LIMIT = 1000  # <--- 在这里设置你想要的总数，比如 200
+    PAGE_SIZE = 50    # 每页取多少，建议不要超过 100
     TASKS = {
         "101": "LAX-AE.xlsx",
         "102": "ORD-AE.xlsx",
@@ -87,6 +92,7 @@ def run_email_sync_task():
         tables = soup.find_all("table", align="center")
         if not tables: return res
 
+        # --- 修改点 1：从第一个表格获取所有总计字段 ---
         for row in tables[0].find_all("tr"):
             tds = row.find_all("td")
             if len(tds) < 2: continue
@@ -101,7 +107,14 @@ def run_email_sync_task():
             elif "Gross Weight" in k:
                 m = num_re.search(v.replace(',', ''))
                 res["T_WGT"] = m.group(0) if m else v
+            elif "Number of CTN" in k: # 新增：获取总箱数 (如 83CTNs/BAGs -> 83)
+                m = num_re.search(v.replace(',', ''))
+                res["T_CTN"] = float(m.group(0)) if m else 0
+            elif "Quantity of parcels" in k: # 新增：获取总包裹数 (如 4816)
+                m = num_re.search(v.replace(',', ''))
+                res["T_PAR"] = float(m.group(0)) if m else 0
 
+        # --- 修改点 2：分拨商表格仅用于获取分拨明细，不再进行累加 ---
         for table in tables:
             h = table.find("td", class_="distributorName")
             if h:
@@ -123,29 +136,41 @@ def run_email_sync_task():
                             res["W"][col] = val if val > 0 else "-"
                         elif "Number of CTN" in label:
                             res["Q"][col] = int(val) if val > 0 else "-"
-                            res["T_CTN"] += val
-                        elif "Quantity of parcels" in label:
-                            res["T_PAR"] += val
+                        # 注意：这里删除了 res["T_CTN"] += val 和 res["T_PAR"] += val
         return res
 
     for fid, fname in TASKS.items():
-        print(f"\n🚀 开始处理 AE 目录 {fid} -> {fname}")
-        list_url = "https://mail.alibaba-inc.com/alimail/ajax/mail/queryMailList.txt"
-        payload = {"query": f'{{"folderIds":["{fid}"]}}', "showFrom": "1", "offset": "0", "length": "20",
-                    "_tpl_": "v5ForWebDing", "_csrf_token_": xsrf_token}
+        print(f"\n🚀 开始处理 AE 目录 {fid} -> {fname} (目标: {FETCH_LIMIT} 封)")
+        all_mails = []
 
-        try:
-            r = session.post(list_url, data=payload, headers=headers, verify=False)
-            text = r.text
-            if text.startswith("/**/"): text = re.search(r'\((.*)\)', text, re.DOTALL).group(1)
-            mails = json.loads(text).get("dataList", [])[:20]
-            mails.reverse()
-        except:
-            print(f"  ❌ 无法获取文件夹 {fid} 的邮件列表")
-            continue
+        # --- 分页拉取逻辑开始 ---
+        for offset in range(0, FETCH_LIMIT, PAGE_SIZE):
+            list_url = "https://mail.alibaba-inc.com/alimail/ajax/mail/queryMailList.txt"
+            payload = {
+                "query": f'{{"folderIds":["{fid}"]}}',
+                "showFrom": "1",
+                "offset": str(offset),
+                "length": str(PAGE_SIZE),
+                "_tpl_": "v5ForWebDing",
+                "_csrf_token_": xsrf_token
+            }
+            try:
+                r = session.post(list_url, data=payload, headers=headers, verify=False)
+                text = r.text
+                if text.startswith("/**/"): text = re.search(r'\((.*)\)', text, re.DOTALL).group(1)
+                batch = json.loads(text).get("dataList", [])
+                if not batch: break  # 如果没数据了，跳出循环
+                all_mails.extend(batch)
+                print(f"  已获取列表: {len(all_mails)}/{FETCH_LIMIT}")
+            except Exception as e:
+                print(f"  ❌ 分页获取失败: {e}")
+                break
 
-        results = [] # 修复点 1: 初始化 results 列表
-        for m in mails:
+        all_mails = all_mails[:FETCH_LIMIT]  # 截取需要的数量
+        all_mails.reverse()  # 翻转，让旧邮件先处理，新邮件后覆盖
+
+        results = []
+        for m in all_mails:
             mid = m.get("mailId")
             load_url = "https://mail.alibaba-inc.com/alimail/ajax/mail/loadMail.txt"
             try:
@@ -154,7 +179,7 @@ def run_email_sync_task():
                                         verify=False).json()
                 if res_json.get("status") in [0, 6]:
                     info = parse_mail_body(res_json["data"]["body"])
-                    
+
                     # 修复点 2: 安全转换数值，防止 int("-") 报错
                     try:
                         t_ctn = int(float(info["T_CTN"]))
@@ -213,7 +238,8 @@ def run_4px_sync_task():
     EXACT_MATCH_TO_STD = {"GOFO": "GOFO", "TOOEXPRESS": "TOO", "TOOEXPRESS-DF": "TOO", "UNIUNI": "UNIUNI",
                           "OC-UNI": "OC UNIUNI", "DHL": "DHL", "IB": "IB", "SPX": "SPX", "ACI": "ACI",
                           "FEDEX GROUND": "FEDEX", "USPS-GA": "USPS", "COE": "COE/UP", "YW EXPRESS": "YW EXP",
-                          "YW EXP": "YW EXP","ATL-GOFO": "ATL-GOFO", "ATL-USPS": "ATL-USPS", "ATL-ACI": "ATL-ACI","ATL-DHL": "ATL-DHL"}
+                          "YW EXP": "YW EXP", "ATL-GOFO": "ATL-GOFO", "ATL-USPS": "ATL-USPS", "ATL-ACI": "ATL-ACI",
+                          "ATL-DHL": "ATL-DHL"}
 
     def get_auth():
         user_home = os.path.expanduser("~")
