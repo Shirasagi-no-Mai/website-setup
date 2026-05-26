@@ -352,8 +352,126 @@ def run_4px_sync_task():
             print(f"  ✅ {fname} 已更新，提取顺序置底。")
 
 
+def run_bdt_sync_task():
+    save_dir = os.path.join(DESKTOP_PATH, "测试文件夹")
+    if not os.path.exists(save_dir): os.makedirs(save_dir, exist_ok=True)
+
+    # 保持与 4PX 一致的列名和渠道顺序
+    CHANNEL_ORDER = [
+        "COE/UP", "GOFO", "SPX", "TOO", "USPS", "YW EXP", "DHL", "ACI", "FEDEX", "IB", "UNIUNI", "OC UNIUNI",
+        "ATL-GOFO", "ATL-USPS", "ATL-ACI", "ATL-DHL"
+    ]
+    # BDT 渠道映射到标准列名
+    BDT_MAP = {"FEDEX": "FEDEX", "GOFO": "GOFO", "USPS": "USPS", "SPX": "SPX"}
+
+    def get_auth():
+        user_home = os.path.expanduser("~")
+        token_path = next((p for p in [os.path.join(user_home, "Desktop", "emailtoken.txt"),
+                                       os.path.join(user_home, "OneDrive", "桌面", "emailtoken.txt")] if
+                           os.path.exists(p)), None)
+        if not token_path: return None, None
+        with open(token_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data.get("cookies", {}), data.get("xsrf_token", None)
+
+    cookies, xsrf_token = get_auth()
+    if not xsrf_token: return
+
+    session = requests.Session()
+    session.cookies.update(cookies)
+    headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/x-www-form-urlencoded"}
+
+    def parse_bdt_body(html_body, subject):
+        soup = BeautifulSoup(html_body, "html.parser")
+        text_content = soup.get_text()
+
+        # 1. 提取口岸 (从主题提取 HKG-LAX -> LAX)
+        port = "UNKNOWN"
+        port_match = re.search(r'-(LAX|ORD|MIA|JFK)', subject)
+        if port_match: port = port_match.group(1)
+
+        # 2. 提取总数数据 (使用正则匹配 <数字>)
+        res = {"MAWB": "-", "FLT": "-", "ETA": "-", "T_WGT": "-", "T_PAR": "-", "T_CTN": "-",
+               "W": {k: "-" for k in CHANNEL_ORDER}, "Q": {k: "-" for k in CHANNEL_ORDER}, "PORT": port}
+
+        res["MAWB"] = (re.search(r"MAWB:\s*([\d-]+)", text_content) or re.search(r"", "")).group(1) if re.search(
+            r"MAWB:\s*([\d-]+)", text_content) else "-"
+        res["T_CTN"] = (re.search(r"Shipping Units:\s*<([\d.]+)>", text_content) or re.search(r"", "")).group(
+            1) if re.search(r"Shipping Units:\s*<([\d.]+)>", text_content) else "-"
+        res["T_PAR"] = (re.search(r"Pieces:\s*<([\d.]+)>", text_content) or re.search(r"", "")).group(1) if re.search(
+            r"Pieces:\s*<([\d.]+)>", text_content) else "-"
+        res["T_WGT"] = (re.search(r"Weight:\s*<([\d.]+)>", text_content) or re.search(r"", "")).group(1) if re.search(
+            r"Weight:\s*<([\d.]+)>", text_content) else "-"
+        res["FLT"] = (re.search(r"Flight Number:\s*(\w+)", text_content) or re.search(r"", "")).group(1) if re.search(
+            r"Flight Number:\s*(\w+)", text_content) else "-"
+        res["ETA"] = (re.search(r"ETA\s+\w+:\s*([\d\w\s:]+?)(?=\n|2\.)", text_content) or re.search(r"", "")).group(
+            1).strip() if re.search(r"ETA\s+\w+:\s*([\d\w\s:]+?)(?=\n|2\.)", text_content) else "-"
+
+        # 3. 提取表格数据 (Network, Weight, Bags)
+        for table in soup.find_all("table"):
+            rows = table.find_all("tr")
+            for row in rows:
+                tds = [t.get_text(strip=True) for t in row.find_all("td")]
+                if len(tds) >= 4 and tds[1] in BDT_MAP:
+                    std_name = BDT_MAP[tds[1]]
+                    res["W"][std_name] = tds[2]  # Weight
+                    res["Q"][std_name] = tds[3]  # Bags/CTN
+        return res
+
+    print(f"🚀 开始处理 BDT 目录 110")
+    list_url = "https://mail.alibaba-inc.com/alimail/ajax/mail/queryMailList.txt"
+    payload = {"query": '{"folderIds":["110"]}', "offset": "0", "length": "20", "_tpl_": "v5ForWebDing",
+               "_csrf_token_": xsrf_token}
+
+    try:
+        r = session.post(list_url, data=payload, headers=headers, verify=False)
+        text = r.text
+        if text.startswith("/**/"): text = re.search(r'\((.*)\)', text, re.DOTALL).group(1)
+        mails = json.loads(text).get("dataList", [])
+        mails.reverse()
+    except:
+        return
+
+    # 按口岸分组合并数据
+    port_results = {}
+    for m in mails:
+        mid, sub = m.get("mailId"), m.get("subject")
+        load_url = "https://mail.alibaba-inc.com/alimail/ajax/mail/loadMail.txt"
+        try:
+            mj = session.post(load_url,
+                              data={"mailId": mid, "full": "1", "_tpl_": "v5ForWebDing", "_csrf_token_": xsrf_token},
+                              headers=headers, verify=False).json()
+            if mj.get("status") in [0, 6]:
+                info = parse_bdt_body(mj["data"]["body"], sub)
+                p = info["PORT"]
+                if p not in port_results: port_results[p] = []
+
+                row_data = {"MAWB": info["MAWB"], "Flight Number": info["FLT"], "ETA": info["ETA"],
+                            "Weight": info["T_WGT"], "Total Parcels": info["T_PAR"], "Total CTN": info["T_CTN"]}
+                for ch in CHANNEL_ORDER: row_data[f"{ch} Weight"] = info["W"][ch]
+                for ch in CHANNEL_ORDER: row_data[f"{ch} CTN"] = info["Q"][ch]
+                port_results[p].append(row_data)
+        except:
+            continue
+
+    # 保存到对应的口岸文件
+    for p, results in port_results.items():
+        if p == "UNKNOWN": continue
+        fname = f"{p}-BDT.xlsx"
+        new_df = pd.DataFrame(results)
+        file_path = os.path.join(save_dir, fname)
+        if os.path.exists(file_path):
+            old_df = pd.read_excel(file_path)
+            combined_df = pd.concat([old_df, new_df], ignore_index=True)
+        else:
+            combined_df = new_df
+        combined_df.drop_duplicates(subset=["MAWB"], keep="last").fillna("-").to_excel(file_path, index=False)
+        print(f"  ✅ {fname} 已更新")
+
+
 if __name__ == "__main__":
     print("=== 开始邮件同步程序 ===")
     run_4px_sync_task()
     run_email_sync_task()
+    run_bdt_sync_task()  # <--- 新增这一行
     print("=== 全部同步完成 ===")
