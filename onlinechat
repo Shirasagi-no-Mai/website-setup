@@ -323,7 +323,7 @@ def run_4px_sync_task():
     for fid, fname in TASKS.items():
         print(f"🚀 处理 4PX 目录 {fid} -> {fname}")
         list_url = "https://mail.alibaba-inc.com/alimail/ajax/mail/queryMailList.txt"
-        payload = {"query": f'{{"folderIds":["{fid}"]}}', "showFrom": "1", "offset": "0", "length": "20",
+        payload = {"query": f'{{"folderIds":["{fid}"]}}', "showFrom": "1", "offset": "0", "length": "50",
                    "_tpl_": "v5ForWebDing", "_csrf_token_": xsrf_token}
         try:
             r = session.post(list_url, data=payload, headers=headers, verify=False)
