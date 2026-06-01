@@ -5,6 +5,7 @@ import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 import urllib3
+from datetime import datetime
 
 # 禁用安全警告（针对阿里内网环境常见证书问题）
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -206,22 +207,35 @@ def run_email_sync_task():
 
         if results:
             new_df = pd.DataFrame(results)
-            cols = ["主单", "航班号", "ETA", "总箱数", "总包裹数", "总重量",
-                    "Maersk 重量", "COE 重量", "USPS 重量", "Speedx重量", "UNIUNI 重量",
-                    "Maersk 大箱数", "COE 大箱数", "USPS 大箱数", "Speedx大箱数", "UNIUNI 大箱数", "COE包裹数"]
-            new_df = new_df.reindex(columns=cols)
-
             file_path = os.path.join(save_dir, fname)
+
             if os.path.exists(file_path):
                 old_df = pd.read_excel(file_path)
-                combined_df = pd.concat([old_df, new_df], ignore_index=True)
+                combined_df = pd.concat([old_df, new_df], ignore_index=True, sort=False)
             else:
                 combined_df = new_df
 
+            # 以主单去重
             final_df = combined_df.drop_duplicates(subset=["主单"], keep="last")
-            final_df.fillna("-").to_excel(file_path, index=False)
-            print(f"  ✅ 已更新并保持提取顺序: {fname}")
 
+            # --- 动态分组排序逻辑 ---
+            all_cols = final_df.columns.tolist()
+            # 1. 基础信息列
+            base_cols = ["主单", "航班号", "ETA", "总箱数", "总包裹数", "总重量"]
+            # 2. 提取所有包含“重量”但不是“总重量”的列，并排序
+            weight_cols = sorted([c for c in all_cols if "重量" in c and c != "总重量"])
+            # 3. 提取所有包含“大箱数”的列，并排序
+            ctn_cols = sorted([c for c in all_cols if "大箱数" in c])
+            # 4. 其他列（如 COE包裹数 等）
+            other_cols = [c for c in all_cols if c not in base_cols + weight_cols + ctn_cols]
+
+            # 组合新顺序：基础信息 + 所有渠道重量 + 所有渠道箱数 + 其他
+            sorted_cols = base_cols + weight_cols + ctn_cols + other_cols
+            # 过滤掉可能不存在的列名
+            sorted_cols = [c for c in sorted_cols if c in all_cols]
+
+            final_df[sorted_cols].fillna("-").to_excel(file_path, index=False)
+            print(f"  ✅ AE {fname} 已动态更新排序")
 
 # ==========================================
 # 任务二：4PX 邮件同步
@@ -233,11 +247,11 @@ def run_4px_sync_task():
     TASKS = {"104": "LAX-4PX.xlsx", "108": "ORD-4PX.xlsx", "107": "MIA-4PX.xlsx"}
     CHANNEL_ORDER = [
         "COE/UP", "GOFO", "SPX", "TOO", "USPS", "YW EXP", "DHL", "ACI", "FEDEX", "IB", "UNIUNI", "OC UNIUNI",
-        "ATL-GOFO", "ATL-USPS", "ATL-ACI", "ATL-DHL"
+        "ATL-GOFO", "ATL-USPS", "ATL-ACI", "ATL-DHL", "SWIFTX"
     ]
     EXACT_MATCH_TO_STD = {"GOFO": "GOFO", "TOOEXPRESS": "TOO", "TOOEXPRESS-DF": "TOO", "UNIUNI": "UNIUNI",
                           "OC-UNI": "OC UNIUNI", "DHL": "DHL", "IB": "IB", "SPX": "SPX", "ACI": "ACI",
-                          "FEDEX GROUND": "FEDEX", "USPS-GA": "USPS", "COE": "COE/UP", "YW EXPRESS": "YW EXP",
+                          "FEDEX GROUND": "FEDEX", "USPS-GA": "USPS", "COE": "COE/UP", "YW EXPRESS": "YW EXP","SWIFTX": "SWIFTX",
                           "YW EXP": "YW EXP", "ATL-GOFO": "ATL-GOFO", "ATL-USPS": "ATL-USPS", "ATL-ACI": "ATL-ACI",
                           "ATL-DHL": "ATL-DHL"}
 
@@ -341,16 +355,31 @@ def run_4px_sync_task():
         if new_results:
             new_df = pd.DataFrame(new_results)
             file_path = os.path.join(save_dir, fname)
+
             if os.path.exists(file_path):
                 old_df = pd.read_excel(file_path)
-                combined_df = pd.concat([old_df, new_df], ignore_index=True)
+                combined_df = pd.concat([old_df, new_df], ignore_index=True, sort=False)
             else:
                 combined_df = new_df
 
             final_df = combined_df.drop_duplicates(subset=["MAWB"], keep="last")
-            final_df.fillna("-").to_excel(file_path, index=False)
-            print(f"  ✅ {fname} 已更新，提取顺序置底。")
 
+            # --- 动态分组排序逻辑 ---
+            all_cols = final_df.columns.tolist()
+            # 1. 基础信息头 (注意 Weight 是总重)
+            header = ["MAWB", "Flight Number", "ETA", "Weight", "Total Parcels", "Total CTN"]
+            # 2. 渠道重量列 (匹配包含 Weight 但不是总重 Weight 的列)
+            chan_weight = sorted([c for c in all_cols if "Weight" in c and c != "Weight"])
+            # 3. 渠道箱数列 (匹配包含 CTN 但不是总箱数 Total CTN 的列)
+            chan_ctn = sorted([c for c in all_cols if "CTN" in c and c != "Total CTN"])
+            # 4. 剩余列
+            others = [c for c in all_cols if c not in header + chan_weight + chan_ctn]
+
+            sorted_cols = header + chan_weight + chan_ctn + others
+            sorted_cols = [c for c in sorted_cols if c in all_cols]
+
+            final_df[sorted_cols].fillna("-").to_excel(file_path, index=False)
+            print(f"  ✅ 4PX {fname} 已动态更新排序")
 
 def run_bdt_sync_task():
     save_dir = os.path.join(DESKTOP_PATH, "测试文件夹")
@@ -359,10 +388,10 @@ def run_bdt_sync_task():
     # 保持与 4PX 一致的列名和渠道顺序
     CHANNEL_ORDER = [
         "COE/UP", "GOFO", "SPX", "TOO", "USPS", "YW EXP", "DHL", "ACI", "FEDEX", "IB", "UNIUNI", "OC UNIUNI",
-        "ATL-GOFO", "ATL-USPS", "ATL-ACI", "ATL-DHL"
+        "ATL-GOFO", "ATL-USPS", "ATL-ACI", "ATL-DHL", "SWIFTX"
     ]
     # BDT 渠道映射到标准列名
-    BDT_MAP = {"FEDEX": "FEDEX", "GOFO": "GOFO", "USPS": "USPS", "SPX": "SPX"}
+    BDT_MAP = {"FEDEX": "FEDEX", "GOFO": "GOFO", "USPS": "USPS", "SPX": "SPX", "SWIFTX": "SWIFTX"}
 
     def get_auth():
         user_home = os.path.expanduser("~")
@@ -385,42 +414,72 @@ def run_bdt_sync_task():
         soup = BeautifulSoup(html_body, "html.parser")
         text_content = soup.get_text()
 
-        # 1. 提取口岸 (从主题提取 HKG-LAX -> LAX)
+        # 1. 提取口岸
         port = "UNKNOWN"
         port_match = re.search(r'-(LAX|ORD|MIA|JFK)', subject)
         if port_match: port = port_match.group(1)
 
-        # 2. 提取总数数据 (使用正则匹配 <数字>)
         res = {"MAWB": "-", "FLT": "-", "ETA": "-", "T_WGT": "-", "T_PAR": "-", "T_CTN": "-",
                "W": {k: "-" for k in CHANNEL_ORDER}, "Q": {k: "-" for k in CHANNEL_ORDER}, "PORT": port}
 
-        res["MAWB"] = (re.search(r"MAWB:\s*([\d-]+)", text_content) or re.search(r"", "")).group(1) if re.search(
-            r"MAWB:\s*([\d-]+)", text_content) else "-"
+        # --- 基础字段提取 ---
+        res["MAWB"] = (re.search(r"MAWB[:：]\s*([\d-]+)", text_content, re.I) or re.search(r"", "")).group(
+            1) if re.search(r"MAWB[:：]\s*([\d-]+)", text_content, re.I) else "-"
         res["T_CTN"] = (re.search(r"Shipping Units:\s*<([\d.]+)>", text_content) or re.search(r"", "")).group(
             1) if re.search(r"Shipping Units:\s*<([\d.]+)>", text_content) else "-"
         res["T_PAR"] = (re.search(r"Pieces:\s*<([\d.]+)>", text_content) or re.search(r"", "")).group(1) if re.search(
             r"Pieces:\s*<([\d.]+)>", text_content) else "-"
         res["T_WGT"] = (re.search(r"Weight:\s*<([\d.]+)>", text_content) or re.search(r"", "")).group(1) if re.search(
             r"Weight:\s*<([\d.]+)>", text_content) else "-"
-        res["FLT"] = (re.search(r"Flight Number:\s*(\w+)", text_content) or re.search(r"", "")).group(1) if re.search(
-            r"Flight Number:\s*(\w+)", text_content) else "-"
-        res["ETA"] = (re.search(r"ETA\s+\w+:\s*([\d\w\s:]+?)(?=\n|2\.)", text_content) or re.search(r"", "")).group(
-            1).strip() if re.search(r"ETA\s+\w+:\s*([\d\w\s:]+?)(?=\n|2\.)", text_content) else "-"
+        res["FLT"] = (re.search(r"Flight Number[:：]\s*(\w+)", text_content, re.I) or re.search(r"", "")).group(
+            1) if re.search(r"Flight Number[:：]\s*(\w+)", text_content, re.I) else "-"
 
-        # 3. 提取表格数据 (Network, Weight, Bags)
+        # --- ETA 提取与格式化 (核心修改点) ---
+        eta_raw = "-"
+        eta_m = re.search(r"ETA\s+\w+[:：]\s*(.*?)(?=\s*\d\.|\r|\n|$)", text_content, re.I | re.DOTALL)
+        if eta_m:
+            eta_raw = eta_m.group(1).strip()
+            try:
+                # 1. 彻底清除括号内容 (如 Local time) 和全角冒号
+                clean_eta = re.sub(r'\(.*?\)', '', eta_raw).replace("：", ":").strip()
+
+                # 2. 修复残缺年份 (202/5/26 -> 2025/5/26)
+                clean_eta = re.sub(r'^202([/\-])', r'2025\1', clean_eta)
+
+                # 3. 检查是否缺少 4 位数的年份 (针对 29 May 18:55 这种情况)
+                if not re.search(r'\d{4}', clean_eta):
+                    # 获取今年年份 (如 2025) 补在字符串后面
+                    curr_year = str(pd.Timestamp.now().year)
+                    clean_eta = f"{clean_eta} {curr_year}"
+
+                # 4. 使用 Pandas 解析
+                # dayfirst=True 帮助解析类似 29 May 的格式
+                dt = pd.to_datetime(clean_eta, errors='coerce', dayfirst=True)
+
+                if pd.notna(dt):
+                    # 格式化输出
+                    res["ETA"] = dt.strftime('%Y-%m-%d %H:%M')
+                else:
+                    res["ETA"] = eta_raw  # 还是不行就保底
+            except:
+                res["ETA"] = eta_raw
+        else:
+            res["ETA"] = "-"
+
+        # --- 提取表格数据 (保持不变) ---
         for table in soup.find_all("table"):
             rows = table.find_all("tr")
             for row in rows:
                 tds = [t.get_text(strip=True) for t in row.find_all("td")]
                 if len(tds) >= 4 and tds[1] in BDT_MAP:
                     std_name = BDT_MAP[tds[1]]
-                    res["W"][std_name] = tds[2]  # Weight
-                    res["Q"][std_name] = tds[3]  # Bags/CTN
+                    res["W"][std_name] = tds[2]
+                    res["Q"][std_name] = tds[3]
         return res
 
     print(f"🚀 开始处理 BDT 目录 110")
     list_url = "https://mail.alibaba-inc.com/alimail/ajax/mail/queryMailList.txt"
-    payload = {"query": '{"folderIds":["110"]}', "offset": "0", "length": "20", "_tpl_": "v5ForWebDing",
+    payload = {"query": '{"folderIds":["110"]}', "offset": "0", "length": "80", "_tpl_": "v5ForWebDing",
                "_csrf_token_": xsrf_token}
 
     try:
@@ -460,13 +519,26 @@ def run_bdt_sync_task():
         fname = f"{p}-BDT.xlsx"
         new_df = pd.DataFrame(results)
         file_path = os.path.join(save_dir, fname)
+
         if os.path.exists(file_path):
             old_df = pd.read_excel(file_path)
-            combined_df = pd.concat([old_df, new_df], ignore_index=True)
+            combined_df = pd.concat([old_df, new_df], ignore_index=True, sort=False)
         else:
             combined_df = new_df
-        combined_df.drop_duplicates(subset=["MAWB"], keep="last").fillna("-").to_excel(file_path, index=False)
-        print(f"  ✅ {fname} 已更新")
+
+        final_df = combined_df.drop_duplicates(subset=["MAWB"], keep="last")
+
+        # --- 动态分组排序逻辑 ---
+        all_cols = final_df.columns.tolist()
+        header = ["MAWB", "Flight Number", "ETA", "Weight", "Total Parcels", "Total CTN"]
+        chan_weight = sorted([c for c in all_cols if "Weight" in c and c != "Weight"])
+        chan_ctn = sorted([c for c in all_cols if "CTN" in c and c != "Total CTN"])
+        others = [c for c in all_cols if c not in header + chan_weight + chan_ctn]
+
+        sorted_cols = [c for c in (header + chan_weight + chan_ctn + others) if c in all_cols]
+
+        final_df[sorted_cols].fillna("-").to_excel(file_path, index=False)
+        print(f"  ✅ BDT {fname} 已动态更新排序")
 
 
 if __name__ == "__main__":
