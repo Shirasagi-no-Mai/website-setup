@@ -42,7 +42,8 @@ def run_email_sync_task():
     TASKS = {
         "101": "LAX-AE.xlsx",
         "102": "ORD-AE.xlsx",
-        "106": "MIA-AE.xlsx"
+        "106": "MIA-AE.xlsx",
+        "112": "JFK-AE.xlsx"
     }
 
     DIST_MAP = {
@@ -244,7 +245,7 @@ def run_4px_sync_task():
     save_dir = os.path.join(DESKTOP_PATH, "测试文件夹")
     if not os.path.exists(save_dir): os.makedirs(save_dir, exist_ok=True)
 
-    TASKS = {"104": "LAX-4PX.xlsx", "108": "ORD-4PX.xlsx", "107": "MIA-4PX.xlsx"}
+    TASKS = {"104": "LAX-4PX.xlsx", "108": "ORD-4PX.xlsx", "107": "MIA-4PX.xlsx", "112": "JFK-4PX.xlsx"}  # <--- 新增 112 映射
     CHANNEL_ORDER = [
         "COE/UP", "GOFO", "SPX", "TOO", "USPS", "YW EXP", "DHL", "ACI", "FEDEX", "IB", "UNIUNI", "OC UNIUNI",
         "ATL-GOFO", "ATL-USPS", "ATL-ACI", "ATL-DHL", "SWIFTX"
