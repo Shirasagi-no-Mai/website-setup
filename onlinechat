@@ -251,7 +251,7 @@ def run_4px_sync_task():
         "ATL-GOFO", "ATL-USPS", "ATL-ACI", "ATL-DHL", "SWIFTX"
     ]
     EXACT_MATCH_TO_STD = {"GOFO": "GOFO", "TOOEXPRESS": "TOO", "TOOEXPRESS-DF": "TOO", "UNIUNI": "UNIUNI",
-                          "OC-UNI": "OC UNIUNI", "DHL": "DHL", "IB": "IB", "SPX": "SPX", "ACI": "ACI",
+                          "OC-UNI": "OC UNIUNI", "DHL": "DHL", "IB": "IB", "SPX": "SPX", "SPX-SELF": "SPX", "ACI": "ACI",
                           "FEDEX GROUND": "FEDEX", "USPS-GA": "USPS", "COE": "COE/UP", "YW EXPRESS": "YW EXP","SWIFTX": "SWIFTX",
                           "YW EXP": "YW EXP", "ATL-GOFO": "ATL-GOFO", "ATL-USPS": "ATL-USPS", "ATL-ACI": "ATL-ACI",
                           "ATL-DHL": "ATL-DHL"}
@@ -313,10 +313,11 @@ def run_4px_sync_task():
                 if channel_raw in EXACT_MATCH_TO_STD:
                     std_name = EXACT_MATCH_TO_STD[channel_raw]
                     try:
-                        ctn_val = num_re.search(tds[1].get_text(strip=True).replace(',', '')).group(0)
-                        wgt_val = num_re.search(tds[3].get_text(strip=True).replace(',', '')).group(0)
-                        res["Q"][std_name] = ctn_val
-                        res["W"][std_name] = wgt_val
+                        ctn_val = float(num_re.search(tds[1].get_text(strip=True).replace(',', '')).group(0))
+                        wgt_val = float(num_re.search(tds[3].get_text(strip=True).replace(',', '')).group(0))
+                        # 如果已有数值则进行累加，防止 SPX 和 SPX-SELF 互相覆盖
+                        res["Q"][std_name] = ctn_val if res["Q"][std_name] == "-" else res["Q"][std_name] + ctn_val
+                        res["W"][std_name] = wgt_val if res["W"][std_name] == "-" else res["W"][std_name] + wgt_val
                     except:
                         pass
         return res
